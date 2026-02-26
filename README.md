@@ -1,13 +1,2 @@
 # Memory Profiler
-
-UI frontend of the memory profiler.
-
-This package was licensed under UDL between the following version ranges:
-com.unity.memoryprofiler@0.1.0-preview.6 (2019-04-03) -> com.unity.memoryprofiler@0.2.4-preview.2 (2020-06-10)
-
-This package is currently licensed under UCL and within the following version ranges:
-com.unity.memoryprofiler@0.2.5-preview.1 (2020-07-01) -> com.unity.memoryprofiler@0.4.3-preview.1 (2021-12-02)
-
-# TreeMapDump
-
-(1) TreeMapDump 详细数据方便进行数量上差异比较 (by yhnu)
+在https://github.com/king3soft/com.unity.memoryprofiler2的基础上添加了输出top10数据的功能<img width="966" height="780" alt="image" src="https://github.com/user-attachments/assets/1fa980bd-2408-4d8d-8d42-31f43c40c9eb" />
