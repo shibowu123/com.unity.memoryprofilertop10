@@ -315,6 +315,13 @@ namespace Unity.MemoryProfiler.Editor.UI
                     m_NeedRefresh = true;
                 }
             }
+            
+            // Export to CSV button
+            if (GUILayout.Button("Export to CSV", GUILayout.Width(100)))
+            {
+                ExportTableToCSV();
+            }
+            
             EditorGUILayout.EndHorizontal();
         }
 
@@ -386,6 +393,86 @@ namespace Unity.MemoryProfiler.Editor.UI
                         m_Spreadsheet.ClearSelection();
                     break;
             }
+        }
+
+        void ExportTableToCSV()
+        {
+            if (m_Spreadsheet == null || m_Spreadsheet.DisplayTable == null)
+            {
+                EditorUtility.DisplayDialog("Export Error", "No data to export.", "OK");
+                return;
+            }
+
+            var table = m_Spreadsheet.DisplayTable;
+            var tableName = TableDisplayName.Replace("/", "_").Replace("\\", "_");
+            
+            var path = EditorUtility.SaveFilePanel(
+                "Export Table to CSV",
+                "",
+                $"{tableName}.csv",
+                "csv");
+
+            if (string.IsNullOrEmpty(path))
+                return;
+
+            try
+            {
+                using (var writer = new System.IO.StreamWriter(path, false, System.Text.Encoding.UTF8))
+                {
+                    // 写入标题行
+                    var meta = table.GetMetaData();
+                    var columnCount = meta.GetColumnCount();
+                    for (int col = 0; col < columnCount; col++)
+                    {
+                        if (col > 0) writer.Write(",");
+                        var column = meta.GetColumnByIndex(col);
+                        var columnName = m_UIState.FormattingOptions.ObjectDataFormatter.ShowPrettyNames ? column.DisplayName : column.Name;
+                        writer.Write(EscapeCSVField(columnName));
+                    }
+                    writer.WriteLine();
+
+                    // 写入数据行
+                    var rowCount = table.GetRowCount();
+                    for (long row = 0; row < rowCount; row++)
+                    {
+                        for (int col = 0; col < columnCount; col++)
+                        {
+                            if (col > 0) writer.Write(",");
+                            
+                            var column = table.GetColumnByIndex(col);
+                            var metaColumn = meta.GetColumnByIndex(col);
+                            var cellString = "";
+                            if (column != null && rowCount == column.GetRowCount())
+                            {
+                                cellString = column.GetRowValueString(row, m_UIState.FormattingOptions.GetFormatter(metaColumn.FormatName));
+                            }
+                            writer.Write(EscapeCSVField(cellString));
+                        }
+                        writer.WriteLine();
+                    }
+                }
+
+                EditorUtility.DisplayDialog("Export Successful", $"Data exported to:\n{path}", "OK");
+            }
+            catch (System.Exception ex)
+            {
+                EditorUtility.DisplayDialog("Export Error", $"Failed to export data:\n{ex.Message}", "OK");
+                Debug.LogError($"Failed to export table to CSV: {ex}");
+            }
+        }
+
+        string EscapeCSVField(string field)
+        {
+            if (string.IsNullOrEmpty(field))
+                return "";
+
+            // 如果字段包含逗号、引号或换行符,需要用引号包围并转义内部引号
+            if (field.Contains(",") || field.Contains("\"") || field.Contains("\n") || field.Contains("\r"))
+            {
+                return "\"" + field.Replace("\"", "\"\"") + "\"";
+            }
+
+            return field;
         }
 
         public override void OnClose()
