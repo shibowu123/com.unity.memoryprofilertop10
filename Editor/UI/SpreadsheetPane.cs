@@ -1,6 +1,7 @@
 #define REMOVE_VIEW_HISTORY
 using UnityEngine;
 using UnityEditor;
+using Unity.MemoryProfiler.Editor.Database;
 
 namespace Unity.MemoryProfiler.Editor.UI
 {
@@ -319,7 +320,8 @@ namespace Unity.MemoryProfiler.Editor.UI
             // Export to CSV button
             if (GUILayout.Button("Export to CSV", GUILayout.Width(100)))
             {
-                ExportTableToCSV();
+                // 延迟调用，避免在 GUI 布局事件中打开模态对话框导致布局栈错误
+                EditorApplication.delayCall += ExportTableToCSV;
             }
             
             EditorGUILayout.EndHorizontal();
@@ -395,6 +397,109 @@ namespace Unity.MemoryProfiler.Editor.UI
             }
         }
 
+        /// <summary>
+        /// 从表链中查找 ObjectListTable（可能被 Filter/Sort/View 包装）
+        /// </summary>
+        ObjectListTable FindObjectListTable(Database.Table table)
+        {
+            if (table is ObjectListTable olt)
+                return olt;
+
+            // IndexedTable 是 SortedTable 和 MatchTable 的基类
+            if (table is Database.Operation.IndexedTable it)
+                return FindObjectListTable(it.m_SourceTable);
+
+            // 反射后备 - 查找字段
+            var sourceTableField = table.GetType().GetField("m_SourceTable");
+            if (sourceTableField != null)
+            {
+                var sourceTable = sourceTableField.GetValue(table) as Database.Table;
+                if (sourceTable != null && sourceTable != table)
+                    return FindObjectListTable(sourceTable);
+            }
+
+            // 反射后备 - 查找属性
+            var sourceTableProp = table.GetType().GetProperty("SourceTable");
+            if (sourceTableProp != null)
+            {
+                var sourceTable = sourceTableProp.GetValue(table) as Database.Table;
+                if (sourceTable != null && sourceTable != table)
+                    return FindObjectListTable(sourceTable);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 获取引用某对象的所有对象的详细信息字符串
+        /// </summary>
+        string GetReferencedByDetails(CachedSnapshot snapshot, ObjectData objData)
+        {
+            try
+            {
+                var referencingObjects = objData.GetAllReferencingObjects(snapshot);
+                if (referencingObjects == null || referencingObjects.Length == 0)
+                    return "";
+
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < referencingObjects.Length; i++)
+                {
+                    if (i > 0) sb.Append("; ");
+                    var refObj = referencingObjects[i].displayObject;
+                    string typeName = "";
+                    string objName = "";
+
+                    switch (refObj.dataType)
+                    {
+                        case ObjectDataType.NativeObject:
+                            int iType = snapshot.NativeObjects.NativeTypeArrayIndex[refObj.nativeObjectIndex];
+                            typeName = snapshot.NativeTypes.TypeName[iType];
+                            objName = snapshot.NativeObjects.ObjectName[refObj.nativeObjectIndex];
+                            break;
+                        case ObjectDataType.Array:
+                        case ObjectDataType.BoxedValue:
+                        case ObjectDataType.Object:
+                        case ObjectDataType.Value:
+                        case ObjectDataType.ReferenceArray:
+                        case ObjectDataType.ReferenceObject:
+                            if (refObj.managedTypeIndex >= 0 && refObj.managedTypeIndex < snapshot.TypeDescriptions.TypeDescriptionName.Length)
+                                typeName = snapshot.TypeDescriptions.TypeDescriptionName[refObj.managedTypeIndex];
+                            else
+                                typeName = "<unknown type>";
+                            // 尝试获取 managed 对象的名称（如果关联了 native 对象）
+                            if (refObj.IsValid)
+                            {
+                                var ptr = refObj.hostManagedObjectPtr;
+                                if (ptr > 0 && snapshot.CrawledData != null && snapshot.CrawledData.MangedObjectIndexByAddress != null)
+                                {
+                                    int moiIdx;
+                                    if (snapshot.CrawledData.MangedObjectIndexByAddress.TryGetValue(ptr, out moiIdx))
+                                    {
+                                        var moi = snapshot.CrawledData.ManagedObjects[moiIdx];
+                                        if (moi.IsValid() && moi.NativeObjectIndex >= 0)
+                                            objName = snapshot.NativeObjects.ObjectName[moi.NativeObjectIndex];
+                                    }
+                                }
+                            }
+                            break;
+                        default:
+                            typeName = refObj.dataType.ToString();
+                            break;
+                    }
+
+                    if (!string.IsNullOrEmpty(objName))
+                        sb.Append($"[{typeName}] {objName}");
+                    else
+                        sb.Append($"[{typeName}]");
+                }
+                return sb.ToString();
+            }
+            catch (System.Exception)
+            {
+                return "";
+            }
+        }
+
         void ExportTableToCSV()
         {
             if (m_Spreadsheet == null || m_Spreadsheet.DisplayTable == null)
@@ -415,13 +520,33 @@ namespace Unity.MemoryProfiler.Editor.UI
             if (string.IsNullOrEmpty(path))
                 return;
 
+            // 尝试从 SourceTable 找到 ObjectListTable 以获取引用详情
+            ObjectListTable objectListTable = FindObjectListTable(m_Spreadsheet.SourceTable);
+            CachedSnapshot snapshot = objectListTable?.Snapshot;
+
+            // 查找 DisplayTable 中的 "Index" 列索引（unified object index），用于获取 ObjectData
+            int indexColumnIdx = -1;
+            var meta = table.GetMetaData();
+            var columnCount = meta.GetColumnCount();
+            if (snapshot != null)
+            {
+                for (int col = 0; col < columnCount; col++)
+                {
+                    var metaCol = meta.GetColumnByIndex(col);
+                    if (metaCol.Name == "Index")
+                    {
+                        indexColumnIdx = col;
+                        break;
+                    }
+                }
+            }
+            bool hasRefDetails = (snapshot != null && indexColumnIdx >= 0);
+
             try
             {
                 using (var writer = new System.IO.StreamWriter(path, false, System.Text.Encoding.UTF8))
                 {
                     // 写入标题行
-                    var meta = table.GetMetaData();
-                    var columnCount = meta.GetColumnCount();
                     for (int col = 0; col < columnCount; col++)
                     {
                         if (col > 0) writer.Write(",");
@@ -429,10 +554,18 @@ namespace Unity.MemoryProfiler.Editor.UI
                         var columnName = m_UIState.FormattingOptions.ObjectDataFormatter.ShowPrettyNames ? column.DisplayName : column.Name;
                         writer.Write(EscapeCSVField(columnName));
                     }
+                    // 追加 Referenced By Details 列标题
+                    if (hasRefDetails)
+                    {
+                        writer.Write(",");
+                        writer.Write(EscapeCSVField("Referenced By Details"));
+                    }
                     writer.WriteLine();
 
                     // 写入数据行
                     var rowCount = table.GetRowCount();
+                    var indexColumn = indexColumnIdx >= 0 ? table.GetColumnByIndex(indexColumnIdx) : null;
+
                     for (long row = 0; row < rowCount; row++)
                     {
                         for (int col = 0; col < columnCount; col++)
@@ -448,6 +581,32 @@ namespace Unity.MemoryProfiler.Editor.UI
                             }
                             writer.Write(EscapeCSVField(cellString));
                         }
+
+                        // 追加 Referenced By Details 列数据
+                        if (hasRefDetails)
+                        {
+                            writer.Write(",");
+                            string refDetails = "";
+                            try
+                            {
+                                var indexStr = indexColumn.GetRowValueString(row, DefaultDataFormatter.Instance);
+                                long unifiedIndex;
+                                if (long.TryParse(indexStr, out unifiedIndex) && unifiedIndex >= 0)
+                                {
+                                    var objData = ObjectData.FromUnifiedObjectIndex(snapshot, unifiedIndex);
+                                    if (objData.IsValid)
+                                    {
+                                        refDetails = GetReferencedByDetails(snapshot, objData);
+                                    }
+                                }
+                            }
+                            catch (System.Exception)
+                            {
+                                refDetails = "";
+                            }
+                            writer.Write(EscapeCSVField(refDetails));
+                        }
+
                         writer.WriteLine();
                     }
                 }
